@@ -5,10 +5,8 @@ use core::convert::TryInto;
 use core::{convert::Infallible, ops::RangeInclusive};
 
 use embedded_time::{
-    duration::{Duration, Milliseconds},
     fixed_point::FixedPoint,
-    fraction::Fraction,
-    rate::{Hertz, Megahertz, Rate},
+    rate::{Hertz, Megahertz},
 };
 
 use nb::Error::WouldBlock;
@@ -38,6 +36,7 @@ impl State for Stable {}
 impl State for Dormant {}
 
 /// Possible errors when initializing the CrystalOscillator
+#[derive(Debug)]
 pub enum Error {
     /// Frequency is out of the 1-15MHz range (see datasheet)
     FrequencyOutOfRange,
@@ -92,45 +91,34 @@ impl CrystalOscillator<Disabled> {
     pub fn initialize(self, frequency: Hertz) -> Result<CrystalOscillator<Initialized>, Error> {
         const ALLOWED_FREQUENCY_RANGE: RangeInclusive<Megahertz<u32>> =
             Megahertz(1)..=Megahertz(15);
-        const STABLE_DELAY: Milliseconds = Milliseconds(1_u32);
-        const DIVIDER: Fraction = Fraction::new(256, 1);
+        // 1ms should provide a stable delay.
+        const MILLIS_PER_SECOND: u32 = 1000;
+        // The delay value is specified in multiples of 256.
+        const DELAY_DIVIDER: u32 = 256;
 
         let freq_mhz: Megahertz = frequency.into();
-
         if !ALLOWED_FREQUENCY_RANGE.contains(&freq_mhz) {
             return Err(Error::FrequencyOutOfRange);
         }
 
-        self.device.ctrl.write(|w| {
-            w.freq_range()._1_15mhz();
-            w
-        });
+        self.device.ctrl.write(|w| w.freq_range()._1_15mhz());
 
-        //1 ms = 10e-3 sec and Freq = 1/T where T is in seconds so 1ms converts to 1000Hz
-        let delay_to_hz: Hertz = STABLE_DELAY.to_rate().map_err(|_| Error::BadArgument)?;
-
-        //startup_delay = ((freq_hz * 10e-3) / 256) = ((freq_hz / 1000) / 256)
-        //See Chapter 2, Section 16, §3)
-        //We do the calculation first.
-        let startup_delay = frequency
-            .checked_div(delay_to_hz.integer())
-            .and_then(|r| r.to_generic::<u32>(DIVIDER).ok())
+        // See Chapter 2, Section 16, §3)
+        // startup_delay = ((freq_hz / 1000) + 128) / 256
+        // 128 is added to ensure the delay rounds up.
+        let startup_delay = frequency.integer()
+            .checked_div(MILLIS_PER_SECOND)
+            .and_then(|cycles| (cycles + 128).checked_div(DELAY_DIVIDER))
             .ok_or(Error::BadArgument)?;
 
-        //Then we check if it fits into an u16.
-        let startup_delay: u16 = (*startup_delay.integer())
+        // Then we check if it fits into an u16.
+        let startup_delay: u16 = startup_delay
             .try_into()
             .map_err(|_| Error::BadArgument)?;
 
-        self.device.startup.write(|w| unsafe {
-            w.delay().bits(startup_delay);
-            w
-        });
+        self.device.startup.write(|w| unsafe { w.delay().bits(startup_delay) });
 
-        self.device.ctrl.write(|w| {
-            w.enable().enable();
-            w
-        });
+        self.device.ctrl.write(|w| w.enable().enable());
 
         Ok(self.transition(Initialized { freq_hz: frequency }))
     }
@@ -142,7 +130,7 @@ pub struct StableOscillatorToken {
 }
 
 impl CrystalOscillator<Initialized> {
-    /// One has to wait for the startup delay before using the oscillator, ie awaiting stablilzation of the XOSC
+    /// One has to wait for the startup delay before using the oscillator, ie awaiting stabilization of the XOSC.
     pub fn await_stabilization(&self) -> nb::Result<StableOscillatorToken, Infallible> {
         if self.device.status.read().stable().bit_is_clear() {
             return Err(WouldBlock);
@@ -151,7 +139,7 @@ impl CrystalOscillator<Initialized> {
         Ok(StableOscillatorToken { _private: () })
     }
 
-    /// Returns the stablilzed oscillator
+    /// Returns the stabilized oscillator
     pub fn get_stable(self, _token: StableOscillatorToken) -> CrystalOscillator<Stable> {
         let freq_hz = self.state.freq_hz;
         self.transition(Stable { freq_hz })
@@ -166,10 +154,7 @@ impl CrystalOscillator<Stable> {
 
     /// Disables the XOSC
     pub fn disable(self) -> CrystalOscillator<Disabled> {
-        self.device.ctrl.modify(|_r, w| {
-            w.enable().disable();
-            w
-        });
+        self.device.ctrl.modify(|_r, w| w.enable().disable());
 
         self.transition(Disabled)
     }
