@@ -75,7 +75,8 @@ impl ShareableClocks {
     }
 }
 
-const XOSC_MHZ: u32 = 12_000_000_u32;
+// TODO: Specify this somehow
+const XOSC_MHZ: u32 = 12u32;
 
 /// Abstraction layer providing Clock Management.
 pub struct ClocksManager {
@@ -86,6 +87,8 @@ impl ClocksManager {
     /// Exchanges CLOCKS block against Self.
     pub fn new(mut clocks_block: CLOCKS, watchdog: &mut Watchdog) -> Self {
         // Start tick in watchdog
+        // TODO: watchdog should always be configured based on the reference clock,
+        // which may or may not be XOSC (although it usually is).
         watchdog.enable_tick_generation(XOSC_MHZ as u8);
 
         // Disable resus that may be enabled from previous software

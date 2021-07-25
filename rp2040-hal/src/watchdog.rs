@@ -23,7 +23,11 @@ impl Watchdog {
     ///
     /// # Arguments
     ///
-    /// * `cycles` - Total number of tick cycles before the next tick is generated.
+    /// * `cycles` - Total number of tick cycles before the next tick is generated. This should
+    ///   be set such that the ticks have a period of 1us (eg. if clk_ref is 12MHz, then `cycles`
+    ///   would be 12), as the watchdog ticks are also used to run the RP2040 Timer (see RP2040
+    ///   datasheet, section 4.6).
+    /// )
     pub fn enable_tick_generation(&mut self, cycles: u8) {
         const WATCHDOG_TICK_ENABLE_BITS: u32 = 0x200;
 
