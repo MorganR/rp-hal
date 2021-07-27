@@ -76,7 +76,7 @@ impl watchdog::WatchdogEnable for Watchdog {
 
         // Due to a logic error, the watchdog decrements by 2 and
         // the load value must be compensated; see RP2040-E1
-        self.delay_ms = period.into().integer() * 2;
+        self.delay_ms = (*period.into().integer()) * 2;
 
         if self.delay_ms > MAX_PERIOD {
             panic!("Period cannot exceed maximum load value of {}", MAX_PERIOD);

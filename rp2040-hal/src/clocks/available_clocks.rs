@@ -13,23 +13,43 @@ use crate::{
 };
 use core::{convert::TryInto, marker::PhantomData};
 use embedded_time::rate::*;
+use pac::generic::ResetValue;
+use pac::clocks::clk_ref_ctrl::SRC_A::{ROSC_CLKSRC_PH, CLKSRC_CLK_REF_AUX};
+use pac::clocks::clk_sys_ctrl::SRC_A::{CLK_REF, CLKSRC_CLK_SYS_AUX};
 use pac::{PLL_SYS, PLL_USB};
 
+/// Determines the appropriate value for the clock's divisor register based on the source and
+/// target frequencies.
 fn make_div<S: TryInto<Hertz<u64>>, F: TryInto<Hertz<u64>>>(
     src_freq: S,
     freq: F,
 ) -> Result<u32, ()> {
+    // Div register reads the upper 24 bits as an integer and the lower 8 as a fractional portion,
+    // so multiply by 2^8 (i.e. left-shift by 8) before dividing in order to correctly calculate
+    // both the integer and the fraction in one go.
     let src_freq = *src_freq.try_into().map_err(|_| ())?.integer();
     let freq = *freq.try_into().map_err(|_| ())?.integer();
     let div: u64 = (src_freq << 8).wrapping_div(freq);
     Ok(div as u32)
 }
 
+/// Determines the real frequency from the source clock's frequency and the divisor (as calculated
+/// by `make_div`).
+fn make_frequency<S: TryInto<Hertz<u32>>>(
+    src_freq: S,
+    div: u32,
+) -> Result<Hertz<u32>, ()> {
+    // Div register reads the upper 24 bits as an integer and the lower 8 as a fractional portion,
+    // so multiply by 2^8 (i.e. left-shift by 8) before dividing in order to correctly calculate
+    // both the integer and the fraction in one go.
+    Ok(Hertz((src_freq.try_into().map_err(|_| ())?.integer() << 8) / div))
+}
+
 /// For clocks with a divider
 trait ClockDivision {
     /// Set integer divider value.
     fn set_div(&mut self, div: u32);
-    /// Get integer diveder value.
+    /// Get integer divider value.
     fn get_div(&self) -> u32;
 }
 
@@ -147,7 +167,7 @@ impl ClockSource for Pin<Gpio22, FunctionClock> {
     }
 }
 
-/// Trait to contrain which ClockSource is valid for which Clock
+/// Trait to constrain which ClockSource is valid for which Clock
 pub trait ValidSrc<Clock>: Sealed {
     /// Which register values are acceptable
     type Variant;
@@ -190,7 +210,9 @@ clock!(
     /// Reference Clock
     struct ReferenceClock {
         reg: clk_ref,
-        src: {Rosc: ROSC_CLKSRC_PH, Xosc:XOSC_CLKSRC},
+        default_src: ROSC_CLKSRC_PH,
+        src: {Rosc:ROSC_CLKSRC_PH, Xosc:XOSC_CLKSRC},
+        use_aux_src: CLKSRC_CLK_REF_AUX,
         auxsrc: {PllUsb:CLKSRC_PLL_USB, GPin0:CLKSRC_GPIN0, GPin1:CLKSRC_GPIN1}
     }
 );
@@ -198,7 +220,9 @@ clock!(
     /// System Clock
     struct SystemClock {
         reg: clk_sys,
-        src: {ReferenceClock: CLK_REF},
+        default_src: CLK_REF,
+        src: {ReferenceClock:CLK_REF},
+        use_aux_src: CLKSRC_CLK_SYS_AUX,
         auxsrc: {PllSys: CLKSRC_PLL_SYS, PllUsb:CLKSRC_PLL_USB, Rosc: ROSC_CLKSRC, Xosc: XOSC_CLKSRC,GPin0:CLKSRC_GPIN0, GPin1:CLKSRC_GPIN1}
     }
 );
@@ -231,23 +255,3 @@ clock!(
         auxsrc: {PllUsb:CLKSRC_PLL_USB,PllSys: CLKSRC_PLL_SYS,  Rosc: ROSC_CLKSRC_PH, Xosc: XOSC_CLKSRC,GPin0:CLKSRC_GPIN0, GPin1:CLKSRC_GPIN1}
     }
 );
-
-impl SystemClock {
-    fn get_default_clock_source(&self) -> pac::clocks::clk_sys_ctrl::SRC_A {
-        pac::clocks::clk_sys_ctrl::SRC_A::CLK_REF
-    }
-
-    fn get_aux_source(&self) -> pac::clocks::clk_sys_ctrl::SRC_A {
-        pac::clocks::clk_sys_ctrl::SRC_A::CLKSRC_CLK_SYS_AUX
-    }
-}
-
-impl ReferenceClock {
-    fn get_default_clock_source(&self) -> pac::clocks::clk_ref_ctrl::SRC_A {
-        pac::clocks::clk_ref_ctrl::SRC_A::ROSC_CLKSRC_PH
-    }
-
-    fn get_aux_source(&self) -> pac::clocks::clk_ref_ctrl::SRC_A {
-        pac::clocks::clk_ref_ctrl::SRC_A::CLKSRC_CLK_REF_AUX
-    }
-}

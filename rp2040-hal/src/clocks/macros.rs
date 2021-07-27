@@ -3,7 +3,9 @@ macro_rules! clock {
         $(#[$attr:meta])*
         struct $name:ident {
             reg: $reg:ident,
+            default_src: $default_src:ident,
             src: {$($src:ident: $src_variant:ident),*},
+            use_aux_src: $use_aux_src:ident,
             auxsrc: {$($auxsrc:ident: $aux_variant:ident),*}
         }
      } => {
@@ -57,10 +59,10 @@ macro_rules! clock {
                     }
                 }
 
-                fn unwrap_src(&self) -> pac::clocks::[<$reg _ctrl>]::SRC_A{
+                fn unwrap_src(&self) -> pac::clocks::[<$reg _ctrl>]::SRC_A {
                     match self {
                         Self::Src(v) => *v,
-                        Self::Aux(_) => panic!(),
+                        Self::Aux(_) => $use_aux_src,
                     }
                 }
 
@@ -77,9 +79,7 @@ macro_rules! clock {
                 pub fn reset_source_await(&mut self) -> nb::Result<(), ()> {
                     let shared_dev = unsafe { self.shared_dev.get() };
 
-                    shared_dev.[<$reg _ctrl>].modify(|_,w| {
-                        w.src().variant(self.get_default_clock_source())
-                    });
+                    shared_dev.[<$reg _ctrl>].write(|w| w.src().variant($default_src));
 
                     self.await_select(&ChangingClockToken{clock_nr:0, clock: PhantomData::<Self>})
                 }
@@ -99,12 +99,12 @@ macro_rules! clock {
 
                 fn set_self_aux_src(&mut self) -> ChangingClockToken<$name> {
                     unsafe { self.shared_dev.get() }.[<$reg _ctrl>].modify(|_, w| {
-                        w.src().variant(self.get_aux_source())
+                        w.src().variant($use_aux_src)
                     });
 
                     ChangingClockToken{
                         clock: PhantomData::<$name>,
-                        clock_nr: pac::clocks::clk_ref_ctrl::SRC_A::CLKSRC_CLK_REF_AUX as u8,
+                        clock_nr: $use_aux_src as u8,
                     }
                 }
 
@@ -116,7 +116,6 @@ macro_rules! clock {
                         return false;
                     }
 
-                    // Div register is 24.8) int.frac divider so multiply by 2^8 (left shift by 8)
                     let div = make_div(src_freq, freq).unwrap();
 
                     // If increasing divisor, set divisor before source. Otherwise set source
@@ -126,14 +125,14 @@ macro_rules! clock {
                         self.set_div(div);
                     }
 
-                    // If switching a glitchless slice (ref or sys) to an aux source, switch
-                    // away from aux *first* to avoid passing glitches when changing aux mux.
-                    // Assume (!!!) glitchless source 0 is no faster than the aux source.
-                    nb::block!(self.reset_source_await()).unwrap();
-
-
-                    // Set aux mux first, and then glitchless mux if this self has one
+                    // Set aux mux first, and then glitchless src mux.
                     let token = if src.is_aux() {
+                        // If switching to another aux source, switch away from aux *first* to avoid
+                        // passing glitches when changing the aux mux.
+                        // This *assumes* that glitchless source 0 is no faster than the aux source.
+                        // TODO: Ideally also only do this if the current source is aux
+                        nb::block!(self.reset_source_await()).unwrap();
+
                         self.set_aux(src);
                         self.set_self_aux_src()
                     } else {
@@ -148,7 +147,7 @@ macro_rules! clock {
                     self.set_div(div);
 
                     // Store the configured frequency
-                    self.frequency = src_freq / div;
+                    self.frequency = make_frequency(src_freq, div).unwrap();
 
                     true
                 }
@@ -206,6 +205,7 @@ macro_rules! divisable_clock {
                 fn get_div(&self) -> u32 {
                     unsafe { self.shared_dev.get() }.[<$reg _div>].read().bits()
                 }
+                // TODO: Implement get_div_integer() and get_div_fractional()
             }
         }
     };
@@ -257,7 +257,6 @@ macro_rules! stoppable_clock {
                         return false;
                     }
 
-                    // Div register is 24.8) int.frac divider so multiply by 2^8 (left shift by 8)
                     let div = make_div(src_freq, freq).unwrap();
 
                     // If increasing divisor, set divisor before source. Otherwise set source
@@ -278,16 +277,16 @@ macro_rules! stoppable_clock {
                         // Delay for 3 cycles of the target clock, for ENABLE propagation.
                         // Note XOSC_COUNT is not helpful here because XOSC is not
                         // necessarily running, nor is timer... so, 3 cycles per loop:
-                        let sys_freq = 125_000_000.Hz(); // TODO
-                        let delay_cyc = sys_freq.div( *self.frequency.integer() ) + 1u32.Hz();
-                        cortex_m::asm::delay(*delay_cyc.integer());
+                        let sys_freq = 125_000_000; // TODO
+                        let delay_cyc = (sys_freq / *self.frequency.integer()) + 1;
+                        cortex_m::asm::delay(delay_cyc);
                     }
 
-                    // Set aux mux first, and then glitchless mux if this self has one
+                    // Set aux mux.
                     self.set_aux(src);
 
                     // Enable clock. On clk_ref and clk_sys this does nothing,
-                    // all other clocks have the ENABLE bit in the same posi
+                    // all other clocks have the ENABLE bit in the same position.
                     self.enable();
 
                     // Now that the source is configured, we can trust that the user-supplied
@@ -295,7 +294,7 @@ macro_rules! stoppable_clock {
                     self.set_div(div);
 
                     // Store the configured frequency
-                    self.frequency = src_freq / div;
+                    self.frequency = make_frequency(src_freq, div).unwrap();
                     true
                 }
             }
